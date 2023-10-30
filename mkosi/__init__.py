@@ -2291,6 +2291,26 @@ def run_shell(args: MkosiArgs, config: MkosiConfig) -> None:
         run(cmdline, stdin=sys.stdin, stdout=sys.stdout, env=os.environ, log=False)
 
 
+def run_journalctl(args: MkosiArgs, config: MkosiConfig):
+    fname = config.output_dir_or_cwd() / config.output
+    cmdline = [
+        find_binary("journalctl"),
+        f"--image={fname}",
+        *args.cmdline
+    ]
+    run(cmdline, stdin=sys.stdin, stdout=sys.stdout, env=os.environ, log=False)
+
+
+def run_coredumpctl(args: MkosiArgs, config: MkosiConfig):
+    fname = config.output_dir_or_cwd() / config.output
+    cmdline = [
+        find_binary("coredumpctl"),
+        f"--image={fname}",
+        *args.cmdline
+    ]
+    run(cmdline, stdin=sys.stdin, stdout=sys.stdout, env=os.environ, log=False)
+
+
 def run_serve(config: MkosiConfig) -> None:
     """Serve the output directory via a tiny HTTP server"""
 
@@ -2652,3 +2672,9 @@ def run_verb(args: MkosiArgs, images: Sequence[MkosiConfig]) -> None:
 
             if args.verb == Verb.serve:
                 run_serve(last)
+
+            if args.verb == Verb.journalctl:
+                return run_journalctl(args, last)
+
+            if args.verb == Verb.coredumpctl:
+                return run_coredumpctl(args, last)
