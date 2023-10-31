@@ -56,12 +56,15 @@ class Verb(StrEnum):
     help          = enum.auto()
     genkey        = enum.auto()
     documentation = enum.auto()
+    vmspawn       = enum.auto()
 
     def supports_cmdline(self) -> bool:
-        return self in (Verb.build, Verb.shell, Verb.boot, Verb.qemu, Verb.ssh)
+        return self in (Verb.build, Verb.shell, Verb.boot, Verb.qemu, Verb.ssh,
+                        Verb.vmspawn)
 
     def needs_build(self) -> bool:
-        return self in (Verb.build, Verb.shell, Verb.boot, Verb.qemu, Verb.serve)
+        return self in (Verb.build, Verb.shell, Verb.boot, Verb.qemu,
+                        Verb.serve, Verb.vmspawn)
 
     def needs_root(self) -> bool:
         return self in (Verb.shell, Verb.boot)
@@ -1940,11 +1943,12 @@ def create_argument_parser(action: type[argparse.Action]) -> argparse.ArgumentPa
         # the synopsis below is supposed to be indented by two spaces
         usage="\n  " + textwrap.dedent("""\
               mkosi [options...] {b}summary{e}
-                mkosi [options...] {b}build{e} [command line...]
-                mkosi [options...] {b}shell{e} [command line...]
-                mkosi [options...] {b}boot{e}  [nspawn settings...]
-                mkosi [options...] {b}qemu{e}  [qemu parameters...]
-                mkosi [options...] {b}ssh{e}   [command line...]
+                mkosi [options...] {b}build{e}   [command line...]
+                mkosi [options...] {b}shell{e}   [command line...]
+                mkosi [options...] {b}boot{e}    [nspawn settings...]
+                mkosi [options...] {b}qemu{e}    [qemu parameters...]
+                mkosi [options...] {b}ssh{e}     [command line...]
+                mkosi [options...] {b}vmspawn{e} [command line...]
                 mkosi [options...] {b}clean{e}
                 mkosi [options...] {b}serve{e}
                 mkosi [options...] {b}bump{e}

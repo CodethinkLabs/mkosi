@@ -50,6 +50,7 @@ from mkosi.mounts import mount, mount_overlay, mount_passwd, mount_usr
 from mkosi.pager import page
 from mkosi.partition import Partition, finalize_root, finalize_roothash
 from mkosi.qemu import QemuDeviceNode, copy_ephemeral, run_qemu, run_ssh
+from mkosi.vmspawn import run_vmspawn
 from mkosi.run import (
     become_root,
     bwrap,
@@ -2654,6 +2655,9 @@ def run_verb(args: MkosiArgs, images: Sequence[MkosiConfig]) -> None:
 
             if args.verb == Verb.qemu:
                 run_qemu(args, last, qemu_device_fds)
+
+            if args.verb == Verb.vmspawn:
+                run_vmspawn(args, last, qemu_device_fds)
 
             if args.verb == Verb.ssh:
                 run_ssh(args, last)
