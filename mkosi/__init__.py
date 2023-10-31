@@ -2291,31 +2291,29 @@ def run_shell(args: MkosiArgs, config: MkosiConfig) -> None:
         run(cmdline, stdin=sys.stdin, stdout=sys.stdout, env=os.environ, log=False)
 
 
-def run_journalctl(args: MkosiArgs, config: MkosiConfig) -> None:
-    if (journalctl := find_binary("journalctl")) is None:
-        logging.error("Failed to find")
-        return None
+def run_ctl_with_name(tool: str, args: MkosiArgs, config: MkosiConfig) -> None:
+    if config.output_format not in (OutputFormat.disk, OutputFormat.directory):
+        die(f"{config.output_format} images cannot be inspected with {tool}")
 
+    if (tool_path := find_binary(tool)) is None:
+        die(f"Failed to find {tool}")
+
+    image_arg_name = "root" if config.output_format == OutputFormat.directory else "image"
     fname = config.output_dir_or_cwd() / config.output
     cmdline: list[PathString] = [
-        journalctl,
-        f"--image={fname}",
+        tool_path,
+        f"--{image_arg_name}={fname}",
         *args.cmdline
     ]
     run(cmdline, stdin=sys.stdin, stdout=sys.stdout, env=os.environ, log=False)
+
+
+def run_journalctl(args: MkosiArgs, config: MkosiConfig) -> None:
+    run_ctl_with_name("journalctl", args, config)
 
 
 def run_coredumpctl(args: MkosiArgs, config: MkosiConfig) -> None:
-    if (coredumpctl := find_binary("coredumpctl")) is None:
-        logging.error("Failed to find")
-        return None
-
-    cmdline: list[PathString] = [
-        coredumpctl,
-        f"--image={config.output_dir_or_cwd() / config.output}",
-        *args.cmdline
-    ]
-    run(cmdline, stdin=sys.stdin, stdout=sys.stdout, env=os.environ, log=False)
+    run_ctl_with_name("coredumpctl", args, config)
 
 
 def run_serve(config: MkosiConfig) -> None:
