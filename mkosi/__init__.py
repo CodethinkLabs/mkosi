@@ -2291,21 +2291,28 @@ def run_shell(args: MkosiArgs, config: MkosiConfig) -> None:
         run(cmdline, stdin=sys.stdin, stdout=sys.stdout, env=os.environ, log=False)
 
 
-def run_journalctl(args: MkosiArgs, config: MkosiConfig):
+def run_journalctl(args: MkosiArgs, config: MkosiConfig) -> None:
+    if (journalctl := find_binary("journalctl")) is None:
+        logging.error("Failed to find")
+        return None
+
     fname = config.output_dir_or_cwd() / config.output
-    cmdline = [
-        find_binary("journalctl"),
+    cmdline: list[PathString] = [
+        journalctl,
         f"--image={fname}",
         *args.cmdline
     ]
     run(cmdline, stdin=sys.stdin, stdout=sys.stdout, env=os.environ, log=False)
 
 
-def run_coredumpctl(args: MkosiArgs, config: MkosiConfig):
-    fname = config.output_dir_or_cwd() / config.output
-    cmdline = [
-        find_binary("coredumpctl"),
-        f"--image={fname}",
+def run_coredumpctl(args: MkosiArgs, config: MkosiConfig) -> None:
+    if (coredumpctl := find_binary("coredumpctl")) is None:
+        logging.error("Failed to find")
+        return None
+
+    cmdline: list[PathString] = [
+        coredumpctl,
+        f"--image={config.output_dir_or_cwd() / config.output}",
         *args.cmdline
     ]
     run(cmdline, stdin=sys.stdin, stdout=sys.stdout, env=os.environ, log=False)
