@@ -18,6 +18,8 @@ mkosi — Build Bespoke OS Images
 
 `mkosi [options…] qemu [qemu parameters…]`
 
+`mkosi [options…] vmspawn [qemu parameters…]`
+
 `mkosi [options…] ssh [command line…]`
 
 `mkosi [options…] clean`
@@ -82,6 +84,15 @@ The following command line verbs are known:
   kernel can also be provided by passing the `-kernel` qemu argument to
   the `qemu` verb. Any arguments specified after the `qemu` verb are
   appended to the `qemu` invocation.
+
+`vmspawn`
+
+: Similar to `boot`, but uses `systemd-vmspawn` to boot up the image, i.e.
+  instead of container virtualization virtual machine virtualization is used.
+  This verb is only supported for disk images that contain a boot loader.
+  Any arguments specified after the `vmspawn` verb are appended to the
+  `systemd-vmspawn` invocation. However these will be forwarded to `qemu`
+  by `systemd-vmspawn` and won't be treated as arguments for `systemd-vmspawn`.
 
 `ssh`
 

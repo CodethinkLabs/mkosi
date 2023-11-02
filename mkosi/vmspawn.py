@@ -1,17 +1,9 @@
-import asyncio
-import base64
 import contextlib
-import enum
-import hashlib
-import logging
 import os
 import shutil
-import socket
 import subprocess
 import sys
-import tempfile
-import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 
 from mkosi.architecture import Architecture
@@ -21,20 +13,15 @@ from mkosi.config import (
     MkosiConfig,
     OutputFormat,
     QemuFirmware,
-    format_bytes,
 )
 from mkosi.log import die
 from mkosi.partition import finalize_root, find_partitions
-from mkosi.run import MkosiAsyncioThread, run, spawn
-from mkosi.tree import copy_tree, rmtree
+from mkosi.run import run, spawn
 from mkosi.types import PathString
-from mkosi.util import INVOKING_USER, StrEnum
+from mkosi.util import INVOKING_USER
 from mkosi.qemu import (
     QemuDeviceNode,
     KernelType,
-    find_ovmf_vars,
-    find_qemu_binary,
-    find_ovmf_firmware,
     vsock_notify_handler,
     start_swtpm,
     start_virtiofsd,
@@ -42,15 +29,18 @@ from mkosi.qemu import (
     copy_ephemeral
 )
 
-def run_vmspawn(args: MkosiArgs, config: MkosiConfig, qemu_device_fds: Mapping[QemuDeviceNode, int]) -> None:
-    if config.output_format not in (OutputFormat.disk, OutputFormat.cpio, OutputFormat.uki, OutputFormat.directory):
-        die(f"{config.output_format} images cannot be booted in qemu")
 
-    if (
-        config.output_format in (OutputFormat.cpio, OutputFormat.uki) and
-        config.qemu_firmware not in (QemuFirmware.auto, QemuFirmware.linux, QemuFirmware.uefi)
-    ):
-        die(f"{config.output_format} images cannot be booted with the '{config.qemu_firmware}' firmware")
+def config_feature_to_tristate(cf: ConfigFeature) -> str:
+    if cf == ConfigFeature.enabled:
+        return "yes"
+    if cf == ConfigFeature.disabled:
+        return "no"
+    return ""
+
+
+def run_vmspawn(args: MkosiArgs, config: MkosiConfig, qemu_device_fds: Mapping[QemuDeviceNode, int]) -> None:
+    if config.output_format != OutputFormat.disk:
+        die(f"{config.output_format} images cannot be booted in systemd-vmspawn")
 
     if (config.runtime_trees and config.qemu_firmware == QemuFirmware.bios):
         die("RuntimeTrees= cannot be used when booting in BIOS firmware")
@@ -61,26 +51,14 @@ def run_vmspawn(args: MkosiArgs, config: MkosiConfig, qemu_device_fds: Mapping[Q
     if config.qemu_vsock == ConfigFeature.enabled and QemuDeviceNode.vhost_vsock not in qemu_device_fds:
         die("VSock requested but cannot access /dev/vhost-vsock")
 
-    accel = "tcg"
-    auto = (
-        config.qemu_kvm == ConfigFeature.auto and
-        config.architecture.is_native() and
-        QemuDeviceNode.kvm.available()
-    )
-    if config.qemu_kvm == ConfigFeature.enabled or auto:
-        accel = "kvm"
+    if config.qemu_cdrom:
+        die("systemd-vmspawn does not support CD-ROM images")
 
     if config.qemu_kernel:
         kernel = config.qemu_kernel
     elif "-kernel" in args.cmdline:
         kernel = Path(args.cmdline[args.cmdline.index("-kernel") + 1])
     else:
-        kernel = None
-
-    if config.output_format == OutputFormat.uki and kernel:
-        logging.warning(
-            f"Booting UKI output, kernel {kernel} configured with QemuKernel= or passed with -kernel will not be used"
-        )
         kernel = None
 
     if kernel and not kernel.exists():
@@ -99,116 +77,54 @@ def run_vmspawn(args: MkosiArgs, config: MkosiConfig, qemu_device_fds: Mapping[Q
     else:
         firmware = config.qemu_firmware
 
-    if (
-        firmware == QemuFirmware.linux or
-        config.output_format in (OutputFormat.cpio, OutputFormat.directory, OutputFormat.uki)
-    ):
-        if firmware == QemuFirmware.uefi:
-            name = config.output if config.output_format == OutputFormat.uki else config.output_split_uki
-            kernel = config.output_dir_or_cwd() / name
-        else:
-            kernel = config.output_dir_or_cwd() / config.output_split_kernel
+    if firmware == QemuFirmware.linux:
+        kernel = config.output_dir_or_cwd() / config.output_split_kernel
         if not kernel.exists():
             die(
                 f"Kernel or UKI not found at {kernel}, please install a kernel in the image "
-                "or provide a -kernel argument to mkosi qemu"
+                "or provide a -kernel argument to mkosi vmspawn"
             )
 
-    ovmf, ovmf_supports_sb = find_ovmf_firmware(config) if firmware == QemuFirmware.uefi else (None, False)
-
-    # A shared memory backend might increase ram usage so only add one if actually necessary for virtiofsd.
-    shm = []
-    if config.runtime_trees or config.output_format == OutputFormat.directory:
-        shm = ["-object", f"memory-backend-memfd,id=mem,size={config.qemu_mem},share=on"]
-
-    if config.architecture == Architecture.arm64:
-        machine = f"type=virt,accel={accel}"
-    else:
-        machine = f"type=q35,accel={accel},smm={'on' if ovmf_supports_sb else 'off'}"
-
-    if shm:
-        machine += ",memory-backend=mem"
-
+    notifications: dict[str, str] = {}
     cmdline: list[PathString] = [
-        find_qemu_binary(config),
-        "-machine", machine,
-        "-smp", config.qemu_smp,
-        "-m", config.qemu_mem,
-        "-object", "rng-random,filename=/dev/urandom,id=rng0",
-        "-device", "virtio-rng-pci,rng=rng0,id=rng-device0",
-        "-nic", "user,model=virtio-net-pci",
-        *shm,
+        "systemd-vmspawn",
+        f"--qemu-smp={config.qemu_smp}",
+        f"--qemu-mem={config.qemu_mem}",
+        f"--qemu-kvm={config_feature_to_tristate(config.qemu_kvm)}",
+
+        # we need to handle this ourselves as we cannot pass the fd to vmspawn
+        # directly but have to pass it to qemu instead
+        # to prevent a conflict we disable vsock for vmspawn
+        "--qemu-vsock=no",
     ]
 
+    if config.qemu_gui:
+        cmdline.append("--qemu-gui")
+
+    if config.secure_boot:
+        cmdline.append("--secure-boot=yes")
+
+    for name, val in config.credentials.items():
+        cmdline.append(f"--set-credential={name}:{val}")
+
+    # values which we need to pass directly to qemu
+    qemu_cmdline: list[PathString] = []
+
     if QemuDeviceNode.vhost_vsock in qemu_device_fds:
-        cmdline += [
+        qemu_cmdline += [
             "-device",
             f"vhost-vsock-pci,guest-cid={machine_cid(config)},vhostfd={qemu_device_fds[QemuDeviceNode.vhost_vsock]}"
         ]
 
-    cmdline += ["-cpu", "max"]
-
-    if config.qemu_gui:
-        cmdline += ["-vga", "virtio"]
-    else:
-        # -nodefaults removes the default CDROM device which avoids an error message during boot
-        # -serial mon:stdio adds back the serial device removed by -nodefaults.
-        cmdline += [
-            "-nographic",
-            "-nodefaults",
-            "-chardev", "stdio,mux=on,id=console,signal=off",
-            "-serial", "chardev:console",
-            "-mon", "console",
-        ]
-
-    if config.architecture.supports_smbios():
-        for k, v in config.credentials.items():
-            payload = base64.b64encode(v.encode()).decode()
-            cmdline += [
-                "-smbios", f"type=11,value=io.systemd.credential.binary:{k}={payload}"
-            ]
-
-    # QEMU has built-in logic to look for the BIOS firmware so we don't need to do anything special for that.
-    if firmware == QemuFirmware.uefi:
-        cmdline += ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}"]
-    notifications: dict[str, str] = {}
-
     with contextlib.ExitStack() as stack:
-        if firmware == QemuFirmware.uefi and ovmf_supports_sb:
-            ovmf_vars = stack.enter_context(tempfile.NamedTemporaryFile(prefix="mkosi-ovmf-vars"))
-            shutil.copy2(find_ovmf_vars(config), Path(ovmf_vars.name))
-            # Make sure qemu can access the ephemeral vars.
-            os.chown(ovmf_vars.name, INVOKING_USER.uid, INVOKING_USER.gid)
-            cmdline += [
-                "-global", "ICH9-LPC.disable_s3=1",
-                "-global", "driver=cfi.pflash01,property=secure,value=on",
-                "-drive", f"file={ovmf_vars.name},if=pflash,format=raw",
-            ]
-
-        if config.qemu_cdrom and config.output_format == OutputFormat.disk:
-            # CD-ROM devices have sector size 2048 so we transform the disk image into one with sector size 2048.
-            src = (config.output_dir_or_cwd() / config.output).resolve()
-            fname = src.parent / f"{src.name}-{uuid.uuid4().hex}"
-            run(["systemd-repart",
-                 "--definitions", "",
-                 "--no-pager",
-                 "--pretty=no",
-                 "--offline=yes",
-                 "--empty=create",
-                 "--size=auto",
-                 "--sector-size=2048",
-                 "--copy-from", src,
-                 fname])
-            stack.callback(lambda: fname.unlink())
-        elif config.ephemeral and config.output_format not in (OutputFormat.cpio, OutputFormat.uki):
+        if config.ephemeral:
             fname = stack.enter_context(copy_ephemeral(config, config.output_dir_or_cwd() / config.output))
         else:
             fname = config.output_dir_or_cwd() / config.output
 
         # Make sure qemu can access the ephemeral copy. Not required for directory output because we don't pass that
         # directly to qemu, but indirectly via virtiofsd.
-        if config.output_format != OutputFormat.directory:
-            os.chown(fname, INVOKING_USER.uid, INVOKING_USER.gid)
+        os.chown(fname, INVOKING_USER.uid, INVOKING_USER.gid)
 
         if config.output_format == OutputFormat.disk and config.runtime_size:
             run(["systemd-repart",
@@ -221,21 +137,15 @@ def run_vmspawn(args: MkosiArgs, config: MkosiConfig, qemu_device_fds: Mapping[Q
 
         root = None
         if kernel:
-            cmdline += ["-kernel", kernel]
+            qemu_cmdline += ["-kernel", kernel]
 
-            if config.output_format == OutputFormat.disk:
-                # We can't rely on gpt-auto-generator when direct kernel booting so synthesize a root=
-                # kernel argument instead.
-                root = finalize_root(find_partitions(fname))
-                if not root:
-                    die("Cannot perform a direct kernel boot without a root or usr partition")
-            elif config.output_format == OutputFormat.directory:
-                sock = stack.enter_context(start_virtiofsd(fname, uidmap=False))
-                cmdline += [
-                    "-chardev", f"socket,id={sock.name},path={sock}",
-                    "-device", f"vhost-user-fs-pci,queue-size=1024,chardev={sock.name},tag=root",
-                ]
-                root = "root=root rootfstype=virtiofs rw"
+            # We can't rely on gpt-auto-generator when direct kernel booting so synthesize a root=
+            # kernel argument instead.
+            root = finalize_root(find_partitions(fname))
+            if not root:
+                die("Cannot perform a direct kernel boot without a root or usr partition")
+
+        cmdline += [f"--image={fname}"]
 
         if kernel and (KernelType.identify(kernel) != KernelType.uki or not config.architecture.supports_smbios()):
             kcl = config.kernel_command_line + config.kernel_command_line_extra
@@ -247,33 +157,27 @@ def run_vmspawn(args: MkosiArgs, config: MkosiConfig, qemu_device_fds: Mapping[Q
 
         for src, target in config.runtime_trees:
             sock = stack.enter_context(start_virtiofsd(src, uidmap=True))
-            cmdline += [
+            qemu_cmdline += [
                 "-chardev", f"socket,id={sock.name},path={sock}",
                 "-device", f"vhost-user-fs-pci,queue-size=1024,chardev={sock.name},tag={sock.name}",
             ]
             kcl += [f"systemd.mount-extra={sock.name}:{target or f'/root/src/{src.name}'}:virtiofs"]
 
         if kernel and (KernelType.identify(kernel) != KernelType.uki or not config.architecture.supports_smbios()):
-            cmdline += ["-append", " ".join(kcl)]
+            qemu_cmdline += ["-append", " ".join(kcl)]
         elif config.architecture.supports_smbios():
-            cmdline += [
+            qemu_cmdline += [
                 "-smbios",
                 f"type=11,value=io.systemd.stub.kernel-cmdline-extra={' '.join(kcl)}"
             ]
 
-        if config.output_format == OutputFormat.cpio:
-            cmdline += ["-initrd", fname]
-        elif (
+        if (
             kernel and KernelType.identify(kernel) != KernelType.uki and
             "-initrd" not in args.cmdline and
             (config.output_dir_or_cwd() / config.output_split_initrd).exists()
         ):
-            cmdline += ["-initrd", config.output_dir_or_cwd() / config.output_split_initrd]
+            qemu_cmdline += ["-initrd", config.output_dir_or_cwd() / config.output_split_initrd]
 
-        if config.output_format == OutputFormat.disk:
-            cmdline += ["-drive", f"if=none,id=mkosi,file={fname},format=raw",
-                        "-device", "virtio-scsi-pci,id=scsi",
-                        "-device", f"scsi-{'cd' if config.qemu_cdrom else 'hd'},drive=mkosi,bootindex=1"]
 
         if (
             firmware == QemuFirmware.uefi and
@@ -281,20 +185,22 @@ def run_vmspawn(args: MkosiArgs, config: MkosiConfig, qemu_device_fds: Mapping[Q
             shutil.which("swtpm") is not None
         ):
             sock = stack.enter_context(start_swtpm())
-            cmdline += ["-chardev", f"socket,id=chrtpm,path={sock}",
+            qemu_cmdline += ["-chardev", f"socket,id=chrtpm,path={sock}",
                         "-tpmdev", "emulator,id=tpm0,chardev=chrtpm"]
 
             if config.architecture == Architecture.x86_64:
-                cmdline += ["-device", "tpm-tis,tpmdev=tpm0"]
+                qemu_cmdline += ["-device", "tpm-tis,tpmdev=tpm0"]
             elif config.architecture == Architecture.arm64:
-                cmdline += ["-device", "tpm-tis-device,tpmdev=tpm0"]
+                qemu_cmdline += ["-device", "tpm-tis-device,tpmdev=tpm0"]
 
         if QemuDeviceNode.vhost_vsock in qemu_device_fds and config.architecture.supports_smbios():
             addr, notifications = stack.enter_context(vsock_notify_handler())
-            cmdline += ["-smbios", f"type=11,value=io.systemd.credential:vmm.notify_socket={addr}"]
+            qemu_cmdline += ["-smbios", f"type=11,value=io.systemd.credential:vmm.notify_socket={addr}"]
 
+        cmdline += ["--"]
         cmdline += config.qemu_args
         cmdline += args.cmdline
+        cmdline += qemu_cmdline
 
         with spawn(
             cmdline,
