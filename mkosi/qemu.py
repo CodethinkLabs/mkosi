@@ -5,11 +5,13 @@ import base64
 import contextlib
 import enum
 import errno
+import fcntl
 import hashlib
 import logging
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -35,6 +37,10 @@ from mkosi.util import INVOKING_USER, StrEnum
 from mkosi.versioncomp import GenericVersion
 
 QEMU_KVM_DEVICE_VERSION = GenericVersion("8.3")
+
+CID_FORMAT = "=Q"
+
+VHOST_VSOCK_SET_GUEST_CID = 0x4008af60
 
 
 class QemuDeviceNode(StrEnum):
@@ -470,9 +476,26 @@ def run_qemu(args: MkosiArgs, config: MkosiConfig, qemu_device_fds: Mapping[Qemu
     cmdline += ["-accel", accel]
 
     if QemuDeviceNode.vhost_vsock in qemu_device_fds:
+        cid = machine_cid(config)
+        vfd = qemu_device_fds[QemuDeviceNode.vhost_vsock]
+        for i in range(64):
+            cidbuf = struct.pack(CID_FORMAT, cid)
+            try:
+                fcntl.ioctl(vfd, VHOST_VSOCK_SET_GUEST_CID, cidbuf)
+            except OSError as e:
+                if e.errno != errno.EADDRINUSE:
+                    raise
+                cid = cid + 1
+                if cid >= 0xFFFFFFFF - 1:
+                    cid = 3
+                continue
+            else:
+                break
+        else:
+            die("Could not find a free CID based on the hash after 64 attempts")
         cmdline += [
             "-device",
-            f"vhost-vsock-pci,guest-cid={machine_cid(config)},vhostfd={qemu_device_fds[QemuDeviceNode.vhost_vsock]}"
+            f"vhost-vsock-pci,guest-cid={cid},vhostfd={vfd}"
         ]
 
     cmdline += ["-cpu", "max"]
